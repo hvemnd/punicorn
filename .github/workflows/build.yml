@@ -1,0 +1,131 @@
+# Punicorn: build the FM-1 firmware package (.fwsc) on GitHub.
+#   - the JieLi toolchain and three files of the AC79 SDK are downloaded once, then cached
+#   - the package is uploaded as an artifact, attached to the "latest" release, and pushed (with the
+#     build log) to the `ci` branch, so the result of every run can be read without signing in
+# Note: every script is run through `sh` (sh build.sh, sh tools/get_toolchain.sh), never as ./script:
+# a checkout without the executable bit would otherwise fail with "Permission denied".
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["dist/**", "**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+env:
+  SDK_TAG: AC79NN_SDK_V1.2.1_2023-12-13
+  RELEASE: "1.0"
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python packages
+        run: pip install Pillow fonttools
+
+      - name: Restore the JieLi toolchain and SDK
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.jieli
+            ~/ac79-sdk
+          key: jieli-${{ env.SDK_TAG }}-v1
+
+      - name: Download the JieLi toolchain
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: sh tools/get_toolchain.sh
+
+      - name: Download the JieLi AC79 SDK (only cpu/wl82/tools is used)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          for i in 1 2 3; do
+            git clone --depth 1 --branch "$SDK_TAG" https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git "$RUNNER_TEMP/sdk" && break
+            echo "clone failed (try $i), retrying"; rm -rf "$RUNNER_TEMP/sdk"; sleep 30
+          done
+          mkdir -p ~/ac79-sdk/cpu/wl82
+          cp -r "$RUNNER_TEMP/sdk/cpu/wl82/tools" ~/ac79-sdk/cpu/wl82/
+          rm -rf "$RUNNER_TEMP/sdk"
+          ls -la ~/ac79-sdk/cpu/wl82/tools/uboot.boot ~/ac79-sdk/cpu/wl82/tools/cfg_tool.bin ~/ac79-sdk/cpu/wl82/tools/cfg/eq_cfg_hw.bin
+
+      - name: Save the JieLi toolchain and SDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.jieli
+            ~/ac79-sdk
+          key: jieli-${{ env.SDK_TAG }}-v1
+
+      - name: Check the toolchain runs here (otherwise use Docker)
+        run: |
+          clang="$HOME/.jieli/toolchain/pi32v2/bin/clang"
+          if "$clang" --version; then
+            echo "toolchain runs natively"
+          else
+            ldd "$clang" || true
+            echo "JIELI_DOCKER=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build the firmware
+        id: build
+        run: |
+          export AC79_SDK="$HOME/ac79-sdk"
+          set -o pipefail
+          sh build.sh --release "$RELEASE" 2>&1 | tee build.log
+          mkdir -p out
+          cp "build/felucca-$RELEASE.fwsc" out/punicorn.fwsc
+          sha256sum out/punicorn.fwsc | tee -a build.log
+
+      - name: Sizes (the biggest symbols, for the log)
+        if: always()
+        run: |
+          od="$HOME/.jieli/toolchain/common/bin/objdump"
+          if [ -f build/felucca.elf ]; then
+            { echo "---- sections"; "$od" -h build/felucca.elf | head -40
+              echo "---- biggest symbols"; "$od" -t build/felucca.elf | awk '{print $(NF-1), $NF, $4}' | sort -r | head -150; } >> build.log 2>&1 || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: punicorn
+          path: |
+            out
+            build.log
+          if-no-files-found: warn
+
+      - name: Push the result to the ci branch (the package and the log)
+        if: always()
+        run: |
+          mkdir ci && cd ci
+          git init -q -b ci
+          cp ../build.log . 2>/dev/null || echo "no log" > build.log
+          [ -f ../out/punicorn.fwsc ] && cp ../out/punicorn.fwsc .
+          echo "${{ github.sha }} ${{ steps.build.outcome }} run ${{ github.run_number }}" > STATUS
+          git add -A
+          git -c user.name="punicorn-ci" -c user.email="ci@users.noreply.github.com" commit -q -m "ci: ${{ github.sha }} ${{ steps.build.outcome }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci
+
+      - name: Release (latest)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag --repo "${{ github.repository }}" 2>/dev/null || true
+          gh release create latest out/punicorn.fwsc --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "Punicorn (latest build)" \
+            --notes "Built from ${{ github.sha }}. Install punicorn.fwsc on an M-Vave FM-1 (see README). At your own risk."

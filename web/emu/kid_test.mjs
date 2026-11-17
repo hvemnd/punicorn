@@ -1,0 +1,855 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Rainbow mode (firmware/src/kid.c) in the browser build, in Node.
+//   node web/emu/kid_test.mjs build/emu/felucca.wasm [OUT_DIR]
+// Checks: it is on from power-up (the hello, then the friend's name in the band), a key sounds and shows its letter in the bubble,
+// PRESETS changes the friend (the band), every friend sounds at about the same level, MASTER is capped, PLAY starts
+// the beat, the top row's tapped effects (and that a key after the tap still sounds), the staff, the grown-ups' VOLUME and the limiter,
+// 21 beats on SEQ, REC's skies, and HOME + SAVE held 3 s leaves for the full Felucca. With OUT_DIR, a screenshot of each step (.ppm).
+import fs from "fs";
+
+const wasmPath = process.argv[2] || "build/emu/felucca.wasm", outDir = process.argv[3];
+const B = { FX: 0, SCL: 1, ENV: 2, LFO: 3, EDIT: 4, GLO: 5, HOME: 6, SAVE: 7, ARP: 8, SEQ: 9, PLAY: 10, REC: 11, OCTDN: 12, OCTUP: 13 };
+const EN = { SELECT: 0, ALGO: 1, PRESETS: 2, K1: 3, K2: 4, K3: 5, K4: 6 };
+let fails = 0;
+const check = (what, ok) => { console.log(`kid: ${what.padEnd(76)} ${ok ? "ok" : "FAIL"}`); if (!ok) fails++; };
+
+const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+const ex = instance.exports, mem = ex.memory;
+ex._initialize();
+ex.web_nor_erase();
+ex.web_boot();
+ex.web_master(1023);
+let peak = 0;
+const render = (ms) => {
+  const n = Math.round(ms * 44.1);
+  for (let k = 0; k < n; k += 128) {
+    const m = Math.min(128, n - k);
+    ex.web_render(m);
+    const l = new Float32Array(mem.buffer, ex.web_out_l(), m), r = new Float32Array(mem.buffer, ex.web_out_r(), m);
+    for (let i = 0; i < m; i++) peak = Math.max(peak, Math.abs(l[i]), Math.abs(r[i]));
+  }
+};
+const px = (x, y) => { const v = new Uint16Array(mem.buffer, ex.web_screen(), 240 * 240)[y * 240 + x]; return ((v & 255) << 8) | (v >> 8); };
+const band = () => { const fb = new Uint16Array(mem.buffer, ex.web_screen(), 240 * 240); return fb.slice(190 * 240, 236 * 240).join(","); };
+const shot = (name) => {
+  if (!outDir) return;
+  const fb = new Uint16Array(mem.buffer, ex.web_screen(), 240 * 240), b = Buffer.alloc(240 * 240 * 3);
+  for (let i = 0; i < fb.length; i++) {
+    const v = ((fb[i] & 255) << 8) | (fb[i] >> 8);
+    b[i * 3] = (v >> 11) << 3; b[i * 3 + 1] = ((v >> 5) & 63) << 2; b[i * 3 + 2] = (v & 31) << 3;
+  }
+  fs.writeFileSync(`${outDir}/kid_${name}.ppm`, Buffer.concat([Buffer.from("P6 240 240 255\n"), b]));
+};
+const WHITE = 0xFFFF;
+const NF = 96;                                                               // the friends (kid_art.h KID_N), the secret one last
+const NFP = NF - 1;                                                          // (the ones PRESETS shows before the 50 stars)
+const KID_Y = (step) => 54 - 3 * step;
+const FXB = [B.FX, B.SCL, B.ENV, B.LFO, B.EDIT, B.GLO];
+
+render(1200);
+shot("hello");
+const hiRed = () => { for (let y = 10; y < 100; y++) for (let x = 40; x < 120; x++) if (px(x, y) === 0xE9A8) return true; return false; };
+check("on from power-up, with the hello (HI in rainbow letters: H red)", hiRed());
+check("silent at rest", peak === 0);
+check("1 FRIEND: SEQ is dark (it is lit where it picks a song or a lesson)", !((ex.web_lit_buttons() >> B.SEQ) & 1));
+
+ex.web_keys(1 << 12);
+render(200);
+shot("key");
+check(`a key sounds (peak ${peak.toFixed(3)}) and lights its LED`, peak > 0.05 && (ex.web_lit_keys() >> 12) & 1);
+const F_GREEN = ((130 >> 3) << 11) | ((214 >> 2) << 5) | (56 >> 3);   // kid.c KID_NOTE_COL: F
+const bandHas = (c) => { for (let y = 186; y < 240; y++) for (let x = 0; x < 240; x++) if (px(x, y) === c) return true; return false; };
+check("its letter shows big in the band, in its colour (F green)", bandHas(F_GREEN));
+ex.web_keys(0);
+render(1200);
+check("let go: the letter goes", !bandHas(F_GREEN));
+check("the key ended the hello: the friend's name in the band", !hiRed() && new Set(band().split(",")).size >= 3);
+const name0 = band();
+
+ex.web_enc(EN.PRESETS, 1);
+render(1700);
+shot("friend2");
+check("PRESETS: another friend (the band shows its name)", band() !== name0);
+
+// the staff: a clef and five lines come in when the child plays, the notes are coloured heads, a chord is stacked, the octave
+// is marked (8VA), and it goes after about 6 s of quiet
+{
+  const INK = ((52 >> 3) << 11) | ((26 >> 2) << 5) | (58 >> 3);               // kid.c KID_INK
+  const col = (r, g, b) => ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+  const C_RED = col(236, 40, 52), A_PUR = col(146, 84, 226), F_GR = col(130, 214, 56), G_TEAL = col(30, 176, 150);
+  const lines = () => px(150, 24) === INK && px(150, 36) === INK && px(150, 48) === INK;
+  const press = (k, ms = 120) => { ex.web_keys(1 << k); render(ms); ex.web_keys(0); render(250); };
+  render(7000);
+  check("no staff while nobody is playing", !lines());
+  press(12);                                                                   // F4: step 3, on the second space
+  shot("staff1");
+  check("a key: the staff comes in (five lines)", lines() && px(14 + 6, 40) !== 0);
+  check("its note is a head in the note's colour (F green) on the staff", px(56, KID_Y(3)) === F_GR);
+  press(14);                                                                   // G4
+  check("the next key writes the next head to its right (G teal)", px(77, KID_Y(4)) === G_TEAL && px(56, KID_Y(3)) === F_GR);
+  ex.web_enc(EN.ALGO, 3); render(100);
+  press(12);                                                                   // F4 with CHORD: F A C stacked
+  shot("staff2");
+  check("a chord is stacked (F, A and C in their colours)", px(98, KID_Y(3)) === F_GR && px(98, KID_Y(5)) === A_PUR && px(98, KID_Y(7)) === C_RED);
+  ex.web_enc(EN.ALGO, -3); render(100);
+  press(0);                                                                    // F3: step -4, a ledger line under the staff
+  check("a low note has its ledger lines (C4 below the staff)", px(125, KID_Y(0)) === INK && px(125, KID_Y(-2)) === INK && px(125, KID_Y(-4)) === INK);
+  ex.web_buttons(1 << B.OCTUP); render(60); ex.web_buttons(0); render(250);
+  press(12);
+  shot("staff3");
+  let mark = false;
+  for (let y = 7; y < 16; y++) for (let x = 31; x < 50; x++) if (px(x, y) === INK) mark = true;
+  check("an octave up: 8VA is written over the staff", mark);
+  ex.web_buttons(1 << B.OCTDN); render(60); ex.web_buttons(0); render(250);
+  render(6500);
+  check("after about 6 s of quiet the staff goes", !lines());
+  press(14);
+  check("and starts again from the left when playing again", lines() && px(56, KID_Y(4)) === G_TEAL && px(77, KID_Y(4)) !== G_TEAL);
+  render(6500);
+}
+
+// note values (by how long a key is held, against the beat): a tap a sixteenth (a stem, two flags), about a beat a
+// quarter (a stem, a filled head), two beats a half (an open head), longer a whole (an open head, no stem)
+{
+  const INK = ((52 >> 3) << 11) | ((26 >> 2) << 5) | (58 >> 3);
+  render(7000);
+  const hold = (k, ms) => { ex.web_keys(1 << k); render(ms); ex.web_keys(0); render(250); };
+  hold(12, 90);                                                                // F4 (step 3), slot 0
+  hold(12, 540);                                                               // slot 1 (DANCE: a beat is 536 ms)
+  hold(12, 1150);                                                              // slot 2
+  hold(12, 1900);                                                              // slot 3
+  shot("values");
+  const y = KID_Y(3), stem = (cx) => px(cx + 4, y - 12) === INK;
+  const flags = (cx) => { let n = 0; for (let yy = y - 21; yy < y - 6; yy++) if ((yy - 24) % 6 && px(cx + 6, yy) === INK) n++; return n; };
+  check(`a tap: a sixteenth (a stem and two flags: ${flags(56)} flag rows)`, stem(56) && flags(56) >= 4);
+  check("about a beat: a quarter (a stem, no flag, a filled head)", stem(77) && flags(77) === 0 && px(77, y) !== WHITE);
+  check("about two beats: a half (a stem, an open head)", stem(98) && px(98, y) === WHITE);
+  check("longer: a whole (an open head, no stem)", !stem(119) && px(119, y) === WHITE);
+  ex.web_keys(1 << 14); render(700);
+  const q = px(140, KID_Y(4)) !== WHITE;
+  render(800);
+  check("held, the note grows as it is held (a quarter, then a half)", q && px(140, KID_Y(4)) === WHITE);
+  ex.web_keys(0); render(7000);
+}
+
+// every friend sounds, and about as loud as the others: loudness (the energy over a phrase, the lows filtered out as the
+// ear hears them, about), not peaks: a pluck and an organ with the same peak are far apart to the ear
+ex.web_kid_stars_set(50);                                                    // (every friend is open for these two loops)
+const levels = [], peaks = [];
+for (let f = 0; f < NF; f++) {
+  let e = 0, n = 0, px = 0, py = 0;
+  peak = 0;
+  for (const k of [12, 14, 16]) {
+    ex.web_keys(1 << k);
+    for (let ms = 0; ms < 650; ms += 2.9) {
+      if (ms >= 500) ex.web_keys(0);
+      ex.web_render(128);
+      const l = new Float32Array(mem.buffer, ex.web_out_l(), 128);
+      for (let i = 0; i < 128; i++) { const y = 0.985 * (py + l[i] - px); px = l[i]; py = y; e += y * y; n++; peak = Math.max(peak, Math.abs(l[i])); }
+    }
+  }
+  levels.push(10 * Math.log10(e / n + 1e-20));
+  peaks.push(peak);
+  ex.web_enc(EN.PRESETS, 1);
+  render(400);
+}
+const lo = Math.min(...levels), hi = Math.max(...levels), pmin = Math.min(...peaks), pmax = Math.max(...peaks);
+check(`all ${NF} friends sound, alike to the ear (within ${(hi - lo).toFixed(1)} dB; peaks ${pmin.toFixed(3)} .. ${pmax.toFixed(3)})`, pmin > 0.04 && hi - lo < 7);
+check("MASTER all the way up stays at about half (no friend peaks over 0.3)", pmax < 0.3);
+
+// NOTE NAMES: HOME held 1 s, then KNOB 2: DO RE MI instead of C D E (u/Competitive_Tank_150), and back; KNOB 2 alone is
+// still day and night
+{
+  const txt = () => { let t = ""; for (let i = 0; i < 24; i++) { const c = ex.web_kid_txt(i); if (!c) break; t += String.fromCharCode(c); } return t; };
+  const say = (keys) => { ex.web_keys(keys); render(200); const t = txt(); ex.web_keys(0); render(1200); return t; };
+  const n0 = ex.web_kid_knobs() >> 16 & 255, first = say(1 << 9);   // (C D E to start; DO RE MI in a build that says so)
+  const doremi = first !== "D";                                  // (RE, or a translation's: レ)
+  ex.web_buttons(1 << B.HOME); render(1300); ex.web_enc(EN.K2, 1); render(200); const said = txt(); ex.web_buttons(0); render(2600);
+  const d = say(1 << 9), ceg = say(1 << 7 | 1 << 11 | 1 << 14);
+  check(`NOTE NAMES: D was ${first}; HOME held, KNOB 2: "${said}"; D is ${d}, C E G is ${ceg}, day and night unmoved`,
+        first.length > 0 && said === (doremi ? "C D E" : "DO RE MI") && d === (doremi ? "D" : "RE") &&
+        ceg === (doremi ? "C E G" : "DO MI SOL") && (ex.web_kid_knobs() >> 16 & 255) === n0);
+  ex.web_buttons(1 << B.HOME); render(1300); ex.web_enc(EN.K2, 1); render(200); ex.web_buttons(0); render(2600);
+  check(`..and again: back to ${first} (D is ${say(1 << 9)})`, say(1 << 9) === first);
+}
+// STAFF: HOME held 1 s, then KNOB 1 left: no staff when a key plays; right: it comes back. KNOB 1 alone still sizes
+{
+  const INK = ((52 >> 3) << 11) | ((26 >> 2) << 5) | (58 >> 3);
+  const lines = () => px(150, 24) === INK && px(150, 36) === INK && px(150, 48) === INK;
+  const key = () => { render(7000); ex.web_keys(1 << 12); render(150); const l = lines(); ex.web_keys(0); render(300); return l; };
+  const grown = (d) => { ex.web_buttons(1 << B.HOME); render(1300); ex.web_enc(EN.K1, d); render(200); ex.web_buttons(0); render(2600); };
+  const on0 = key();
+  grown(-1); const off = key();
+  grown(1); const on1 = key();
+  check(`STAFF: a key shows it (${on0}); HOME held, KNOB 1 left: none (${off}); right: back (${on1})`, on0 && !off && on1);
+}
+// ALGORITHM's card: a few words on how the mode plays, in the staff's panel, until a key (or 7 s)
+ex.web_enc(EN.ALGO, 1); render(300);
+const card1 = ex.web_kid_card();
+ex.web_keys(1 << 7); render(150); ex.web_keys(0); render(300);
+const card2 = ex.web_kid_card();
+ex.web_enc(EN.ALGO, -1); render(300);
+const card3 = ex.web_kid_card(); render(7500);
+check(`ALGORITHM: its card shows (${card1}), goes at a key (${card2}), and after 7 s (${ex.web_kid_card()})`,
+      card1 === 2 && card2 === 0 && card3 === 1 && ex.web_kid_card() === 0);
+// 3 FRIENDS: every friend sings the whole chord, the mono ones too (their legato is for 1 FRIEND); a drum friend, one drum
+const DRUMS = new Set([12, 46, 47, 48, 49, 90]), thin = [], chordLv = [];
+ex.web_enc(EN.ALGO, 3); render(100);
+for (let f = 0; f < NF; f++) {
+  const fr = ex.web_kid_friend();
+  ex.web_keys(1 << 12); render(120);
+  const v = ex.web_voices(0);
+  ex.web_keys(0); render(500);
+  if (!DRUMS.has(fr) && v < 3) thin.push(`${fr}:${v}`);
+  ex.web_enc(EN.PRESETS, 1); render(400);
+}
+check(`3 FRIENDS: every friend sings three notes${thin.length ? " (not: " + thin.join(" ") + ")" : ""}`, thin.length === 0);
+// .. and the chord is the major chord built on the key, white or black (to find the magic ones), not the key's chord in C
+for (let i = 0; i < NF + 4 && ex.web_kid_friend() !== 0; i++) { ex.web_enc(EN.PRESETS, 1); render(150); }   // (DUCKY)
+const pcsOf = (k) => { ex.web_keys(1 << k); render(120); const p = [0, 1, 2, 3].map((i) => ex.web_kb_chord(k, i)).filter((n) => n).map((n) => n % 12); ex.web_keys(0); render(400); return [...new Set(p)].sort((a, b) => a - b).join(" "); };
+const dMaj = pcsOf(9), csMaj = pcsOf(8), aMaj = pcsOf(16);
+check(`3 FRIENDS: D plays D major (D F# A: ${dMaj}), C# plays C# major (C# F G#: ${csMaj}), A plays A major (${aMaj})`,
+      dMaj === "2 6 9" && csMaj === "1 5 8" && aMaj === "1 4 9");
+ex.web_enc(EN.ALGO, -3); render(100);
+ex.web_kid_stars_set(0);
+ex.web_keys(1 << 12); render(120);
+const mono1 = ex.web_voices(0);
+ex.web_keys(0); render(500);
+check("1 FRIEND: one note a key (a mono friend keeps its slide)", mono1 >= 1);
+
+ex.web_buttons(1 << B.PLAY); render(60); ex.web_buttons(0); render(1500);
+check("PLAY: the beat runs", ex.web_playing() === 1);
+ex.web_buttons(1 << B.PLAY); render(60); ex.web_buttons(0); render(200);
+check("PLAY again stops it", ex.web_playing() === 0);
+
+// the top row: a tap turns each effect on (the sound of a held key changes, its button lights, the band names it),
+// a second tap off; SLEEPY wakes up by itself
+{
+  let sig = 0;
+  const listen = (btns) => {
+    ex.web_keys(1 << 12); render(300);
+    if (btns) { ex.web_buttons(btns); render(60); ex.web_buttons(0); }
+    sig = 0;
+    const n = Math.round(600 * 44.1);
+    for (let k = 0; k < n; k += 128) {
+      const m = Math.min(128, n - k); ex.web_render(m);
+      const l = new Float32Array(mem.buffer, ex.web_out_l(), m);
+      for (let i = 0; i < m; i++) sig = (sig * 31 + Math.round(l[i] * 30000)) % 1000000007;
+    }
+    const r = { sig, band: band(), lit: ex.web_lit_buttons() };
+    ex.web_keys(0);
+    if (btns && (ex.web_lit_buttons() & btns)) { ex.web_buttons(btns); render(60); ex.web_buttons(0); }   // off again
+    render(3500);
+    r.off = !(ex.web_lit_buttons() & btns);
+    return r;
+  };
+  const plain = listen(0);
+  let ok = 0;
+  for (const b of [B.FX, B.SCL, B.ENV, B.LFO, B.EDIT, B.GLO]) {
+    const r = listen(1 << b);
+    if (r.sig !== plain.sig && r.band !== plain.band && ((r.lit >> b) & 1) && r.off) ok++;
+  }
+  check(`the top row tapped: ${ok} of 6 effects change the sound, light up, show their word, and go off again`, ok === 6);
+}
+
+{
+  const tap = (b) => { ex.web_buttons(1 << b); render(60); ex.web_buttons(0); render(200); };
+  tap(B.FX); tap(B.SCL);
+  const lit = ex.web_lit_buttons();
+  check("tapping another effect switches to it (one at a time)", ((lit >> B.SCL) & 1) && !((lit >> B.FX) & 1));
+  tap(B.SCL);
+  tap(B.ENV); render(3300);
+  check("SLEEPY wakes up by itself (its light goes off)", !((ex.web_lit_buttons() >> B.ENV) & 1));
+}
+
+// a key pressed after an effect was tapped on (the effect heard silence): the note must still sound. HICCUP, BACKWARDS,
+// SLEEPY and FREEZE keep what they last heard, which in a silence is nothing, unless each new key sets them again
+{
+  const wait = (ms) => render(ms);
+  const heard = (btn) => {
+    wait(1500);
+    if (btn !== null) { ex.web_buttons(1 << btn); render(60); ex.web_buttons(0); render(500); }
+    peak = 0;
+    ex.web_keys(1 << 14); render(700);
+    const p = peak;
+    ex.web_keys(0); render(300);
+    if (btn !== null) { ex.web_buttons(1 << btn); render(60); ex.web_buttons(0); }
+    wait(3200);
+    return p;
+  };
+  const plain = heard(null);
+  const names = ["HICCUP", "BACKWARDS", "SLEEPY", "SQUEAKY", "GIANT", "FREEZE"];
+  const r = [FXB.map((b) => heard(b))][0];
+  r.forEach((p, i) => check(`${names[i]} tapped in a silence, then a key: the note sounds (${p.toFixed(3)} of ${plain.toFixed(3)})`, p > plain * 0.4));
+}
+
+// the grown-ups' VOLUME: HOME held 1 s opens it (VOLUME and its dots in the band), OCT- / OCT+ step it (eight steps),
+// MASTER can go no higher, and the limiter's ceiling goes down with it
+{
+  const lvl = () => ex.web_master_q12();
+  const capOf = { 1: 362, 2: 512, 3: 724, 4: 1024, 5: 1448, 6: 2048, 7: 2896, 8: 4080 };   // (the pot's top: 4080)
+  const holdHome = () => { ex.web_buttons(1 << B.HOME); render(1300); };
+  const step = (b) => { ex.web_buttons((1 << B.HOME) | (1 << b)); render(80); ex.web_buttons(1 << B.HOME); render(150); };
+  render(2500);
+  check("VOLUME 6 to begin with: MASTER all up gives 2048", lvl() === 2048);
+  ex.web_buttons(1 << B.HOME); render(300);
+  ex.web_buttons((1 << B.HOME) | (1 << B.OCTDN)); render(80); ex.web_buttons(0); render(300);
+  check("HOME held a short while: OCT- is still the size, the volume stays", lvl() === 2048);
+  render(3500);
+  const name = band();
+  holdHome();
+  check("HOME held 1 s: the band shows VOLUME", band() !== name);
+  shot("volume");
+  step(B.OCTDN);
+  check("..OCT-: one step down (1448)", lvl() === 1448);
+  step(B.OCTUP);
+  step(B.OCTUP);
+  check("..OCT+ twice: two up (2896)", lvl() === 2896);
+  for (let i = 0; i < 9; i++) step(B.OCTUP);
+  check("..the top step is the full MASTER (4080 at the pot's top), and no more", lvl() === 4080);
+  for (let i = 0; i < 12; i++) step(B.OCTDN);
+  check("..the bottom step is 362, and no less", lvl() === 362);
+  ex.web_buttons(0);
+  render(2600);
+  check("HOME let go after VOLUME: no surprise friend, the name stays", band() === name);
+  // the limiter: a chord over the beat at every step stays under its ceiling, and is not squashed by it
+  ex.web_enc(EN.ALGO, 3); render(100);
+  ex.web_buttons(1 << B.PLAY); render(60); ex.web_buttons(0); render(300);
+  const peaks = [];
+  for (let L = 1; L <= 8; L++) {
+    render(2200);
+    const cap = lvl(), lim = ex.web_lim_t();
+    check(`VOLUME ${L}: MASTER ${cap}, the limiter's ceiling ${(lim / 65536).toFixed(3)}`, cap === capOf[L] && lim <= 18000 && lim >= 400);
+    peak = 0;
+    for (const ks of [[12, 14, 16], [5, 7, 9], [20, 22, 24]]) { ex.web_keys(ks.reduce((a, x) => a | (1 << x), 0)); render(500); ex.web_keys(0); render(200); }
+    peaks.push(peak);
+    if (lim < 18000)    // (at the full Felucca's ceiling its own limiter works as it always has: a fast attack, not instant)
+      check(`VOLUME ${L}: a chord over the beat peaks at ${peak.toFixed(3)}, under the ceiling`, peak <= lim / 65536 * 1.08);
+    ex.web_buttons(1 << B.HOME); render(1300);
+    step(B.OCTUP);
+    ex.web_buttons(0); render(2200);
+  }
+  check(`the levels rise with the steps (${peaks.map((p) => p.toFixed(2)).join(" ")})`, peaks.every((p, i) => !i || p >= peaks[i - 1] * 0.95));
+  // an effect that raised the level (here the gain after MASTER, 8 times) is held to the ceiling, at the quietest step and the middle
+  for (const L of [1, 4]) {
+    ex.web_buttons(1 << B.HOME); render(1300);
+    for (let i = 0; i < 8; i++) step(B.OCTDN);
+    for (let i = 1; i < L; i++) step(B.OCTUP);
+    ex.web_buttons(0); render(2200);
+    const lim = ex.web_lim_t() / 65536;
+    ex.web_boost_q12(8 * 4096); render(300);
+    peak = 0;
+    for (const ks of [[12, 14, 16], [5, 7, 9], [20, 22, 24]]) { ex.web_keys(ks.reduce((a, x) => a | (1 << x), 0)); render(500); ex.web_keys(0); render(200); }
+    const hot = peak;
+    ex.web_boost_q12(4096); render(300);
+    check(`VOLUME ${L}, the level 8 times too high: the limiter holds it to ${hot.toFixed(3)} (ceiling ${lim.toFixed(3)})`, hot <= lim * 1.15);
+  }
+  ex.web_buttons(1 << B.PLAY); render(60); ex.web_buttons(0); render(300);
+  ex.web_enc(EN.ALGO, -3); render(100);
+  // back to 6, and kept over a power-off
+  ex.web_buttons(1 << B.HOME); render(1300);
+  for (let i = 0; i < 8; i++) step(B.OCTUP);
+  for (let i = 0; i < 2; i++) step(B.OCTDN);
+  ex.web_buttons(0); render(2200);
+  check("VOLUME back to 6 (2048)", lvl() === 2048);
+  ex.web_buttons(1 << B.HOME); render(1300);
+  step(B.OCTDN); step(B.OCTDN);
+  ex.web_buttons(0); render(2200);
+  check("VOLUME 4 (1024)", lvl() === 1024);
+  const nor = new Uint8Array(mem.buffer, ex.web_nor(), ex.web_nor_size()).slice();
+  const inst2 = (await WebAssembly.instantiate(fs.readFileSync(wasmPath), {})).instance, e2 = inst2.exports;
+  e2._initialize();
+  new Uint8Array(e2.memory.buffer, e2.web_nor(), e2.web_nor_size()).set(nor);
+  e2.web_boot();
+  e2.web_master(1023);
+  for (let k = 0; k < 400; k++) e2.web_render(128);
+  check("kept over a power-off: the next start has the same VOLUME (1024)", e2.web_master_q12() === 1024);
+}
+
+// the grown-ups' LOOK-ALIKES (u/ReallyLongLake): HOME held 1 s and PRESETS left shows original stand-ins for the friends drawn
+// after TV and film characters (their own picture and name, the same sound), kept over a power-off with the VOLUME untouched;
+// PRESETS right brings the look-alikes back. Every friend stays on PRESETS either way
+{
+  const f0 = ex.web_kid_friend(), go = (e, f) => { for (let i = 0; i < NF && e.web_kid_friend() !== f; i++) { e.web_enc(EN.PRESETS, 1); for (let k = 0; k < 10; k++) e.web_render(128); } for (let k = 0; k < 600; k++) e.web_render(128); };
+  const fb = (e) => new Uint16Array(e.memory.buffer, e.web_screen(), 240 * 240).slice(190 * 240, 236 * 240).join(",");
+  const tour = (e) => { const seen = new Set(); for (let i = 0; i < NFP + 4; i++) { e.web_enc(EN.PRESETS, 1); for (let k = 0; k < 40; k++) e.web_render(128); seen.add(e.web_kid_friend()); } return seen; };
+  go(ex, 14);                                                                  // WEB HERO
+  const name = band();
+  ex.web_buttons(1 << B.HOME); render(1300);
+  ex.web_enc(EN.PRESETS, -1); render(200);
+  shot("lookalikes");
+  const word = band();
+  ex.web_buttons(0); render(2600);
+  shot("standin");
+  check("HOME held, PRESETS left: the band says so, then WEB HERO shows its stand-in's name", word !== name && band() !== name && band() !== word && ex.web_kid_friend() === 14);
+  check(`..every friend is still on PRESETS (${NFP}, the secret one not yet)`, tour(ex).size === NFP);
+  go(ex, 14);
+  peak = 0; ex.web_keys(1 << 12); render(300); ex.web_keys(0); render(400);
+  check(`..and the stand-in sings (the same sound, peak ${peak.toFixed(3)})`, peak > 0.02);
+  const nor = new Uint8Array(mem.buffer, ex.web_nor(), ex.web_nor_size()).slice();
+  const e3 = (await WebAssembly.instantiate(fs.readFileSync(wasmPath), {})).instance.exports;
+  e3._initialize();
+  new Uint8Array(e3.memory.buffer, e3.web_nor(), e3.web_nor_size()).set(nor);
+  e3.web_boot(); e3.web_master(1023);
+  for (let k = 0; k < 400; k++) e3.web_render(128);
+  e3.web_keys(1); for (let k = 0; k < 40; k++) e3.web_render(128); e3.web_keys(0);
+  for (let k = 0; k < 600; k++) e3.web_render(128);
+  go(e3, 14);
+  for (let k = 0; k < 1000; k++) e3.web_render(128);
+  render(2900);
+  check("kept over a power-off (the stand-in's name), and the VOLUME with it (1024)", fb(e3) === band() && e3.web_master_q12() === 1024);
+  go(ex, 0);
+  const duck = band();
+  ex.web_buttons(1 << B.HOME); render(1300);
+  ex.web_enc(EN.PRESETS, 1); render(200);
+  ex.web_buttons(0); render(2600);
+  check("a friend that is no look-alike is the same either way (DUCKY)", band() === duck);
+  go(ex, 14);
+  check("HOME held, PRESETS right: WEB HERO is back", band() === name);
+  go(ex, f0);
+  render(1500);
+}
+
+// keys held together: their letters in their colors and the chord's name (u/nutty_cartoon); ALGORITHM's modes:
+// STRUM (u/veecheech: black keys pick a chord, white keys strum it), GUESS (an ear game, gentle) and FOLLOW (songs to learn,
+// the next key lit) (u/nutty_cartoon)
+{
+  const col = (r, g, b) => ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+  const C_RED = col(236, 40, 52), E_YEL = col(255, 218, 36), G_TEAL = col(30, 176, 150), B_PINK = col(242, 86, 176), D_OR = col(255, 140, 26);
+  const tapb = (b) => { ex.web_buttons(1 << b); render(60); ex.web_buttons(0); render(250); };
+  const algo = (d) => { ex.web_enc(EN.ALGO, d); render(200); };
+  render(7000);
+  ex.web_keys((1 << 7) | (1 << 11) | (1 << 14)); render(300);
+  shot("chord");
+  check("C, E and G together: their letters in their colors (C red, E yellow, G teal)", bandHas(C_RED) && bandHas(E_YEL) && bandHas(G_TEAL));
+  const named = band();
+  ex.web_keys(0); render(1200);
+  ex.web_keys((1 << 9) | (1 << 12) | (1 << 16)); render(300);     // D F A: D minor
+  check("another chord, another name (D F A)", band() !== named && bandHas(D_OR));
+  ex.web_keys(0); render(1500);
+  while (ex.web_kid_friend() === 12) { ex.web_enc(EN.PRESETS, 1); render(400); }   // (not SCISSORS: its keys are drums)
+  render(1500);
+  algo(1); algo(1);
+  check("ALGORITHM two steps: STRUM", band() !== named);
+  render(1600);
+  peak = 0;
+  ex.web_keys(1 << 15); render(250); ex.web_keys(0); render(100);              // G#: the G chord
+  shot("strum");
+  check("STRUM: a black key picks its chord (G: G teal, B pink, D orange in the band)", bandHas(G_TEAL) && bandHas(B_PINK) && bandHas(D_OR));
+  peak = 0;
+  for (const k of [0, 2, 3, 5, 7, 9, 10, 12]) { ex.web_keys(1 << k); render(220); ex.web_keys(0); render(10); }
+  check(`STRUM: the white keys strum it (peak ${peak.toFixed(3)})`, peak > 0.02);
+  render(1500);
+  algo(1);                                                                    // ACCORDION
+  render(1600);
+  const iconBand = band();
+  check("ACCORDION: its picture in the band with the friend's name", iconBand !== named);
+  ex.web_keys(1 << 8); render(300);                                           // C#: the C chord, held
+  shot("accordion");
+  check("ACCORDION: a black key plays its chord (C E G in the band)", bandHas(C_RED) && bandHas(E_YEL) && bandHas(G_TEAL));
+  ex.web_keys(0); render(1200);
+  {
+    const PINK = col(242, 86, 176), ORNG = col(255, 140, 26), GRN = col(130, 214, 56), PURP = col(146, 84, 226);
+    ex.web_keys(1 << 20); render(300);                                        // C#5: the second row, a jazz ninth
+    shot("accordion9");
+    check(`ACCORDION, the next row up: a ninth (C E B D, ${ex.web_voices(0)} voices, friend ${ex.web_kid_friend()})`,
+          bandHas(C_RED) && bandHas(E_YEL) && bandHas(PINK) && !bandHas(G_TEAL) && ex.web_voices(0) >= 3);
+    ex.web_keys(0); render(1200);
+    ex.web_keys(1 << 25); render(300);                                        // F#5: fourths on F
+    shot("accordion11");
+    check("ACCORDION, the top key: fourths on F (F B E, and A where the engine has the voices)", bandHas(GRN) && bandHas(PINK) && bandHas(E_YEL));
+    ex.web_keys(0); render(1200);
+    // ARP in ACCORDION: once, SPARKLE TUNE (the chord steady on track 3, the tune arpeggiated); twice, SPARKLE ALL; three times, off
+    const arp = () => { ex.web_buttons(1 << B.ARP); render(80); ex.web_buttons(0); render(150); };
+    const words = band();
+    arp();
+    const tuneWord = band();
+    ex.web_keys((1 << 8) | (1 << 19) | (1 << 23)); render(150);            // C#4 (C) with C5 and E5
+    let steady = true;
+    for (let i = 0; i < 6; i++) { render(60); if (ex.web_voices(2) < 3) steady = false; }
+    check(`ARP in ACCORDION: SPARKLE TUNE, the chord holds (${ex.web_voices(2)} voices on its own track) under the tune`, steady && tuneWord !== words);
+    ex.web_keys(0); render(800);
+    arp();
+    const allWord = band();
+    ex.web_keys(1 << 8); render(400);
+    check("..twice: SPARKLE ALL, the chord sparkles too (on the friend's track)", ex.web_voices(2) <= 1 && allWord !== tuneWord);   // (track 3:
+                                                  // the sub octave under it, one voice, not the chord)
+    ex.web_keys(0); render(800);
+    arp();
+    ex.web_keys(1 << 8); render(300);
+    check("..three times: off, the chord plain again", ex.web_voices(0) >= 3 && ex.web_voices(2) <= 1);
+    ex.web_keys(0); render(1200);
+  }
+  ex.web_keys(1 << 14); render(300);                                          // G: its own note
+  check("ACCORDION: a white key plays its own note (G teal, no chord)", bandHas(G_TEAL) && !bandHas(C_RED));
+  ex.web_keys(0); render(1500);
+  ex.web_kid_friend_set(59); render(1200);       // (a friend that sings: HOME's surprise friend above is anyone, and
+  algo(1);                                        //  the bass, drum and noise friends cheer with no notes, on purpose)
+  render(400);
+  peak = 0; render(1200);
+  shot("guess");
+  check(`GUESS: a friend sings a note by itself (peak ${peak.toFixed(3)}) and the band asks`, peak > 0.02);   // (which friend
+                                                  // this is depends on how many there are; a vowel peaks low)
+  const t = ex.web_kid_guess();
+  const wrong = t === 7 ? 14 : 7;
+  ex.web_keys(1 << wrong); render(150); ex.web_keys(0); render(200);
+  check("a wrong key: TRY AGAIN in the band (no sound of its own)", bandHas(col(236, 120, 40)));
+  render(2500);
+  ex.web_keys(1 << t); render(150); ex.web_keys(0); render(200);
+  check("the right key: YES! and confetti", bandHas(col(56, 170, 80)));
+  const cheering = ex.web_voices(0);
+  check(`..and a cheer: the friend plays a few notes (voices ${cheering})`, cheering >= 1 && ex.web_kid_cheer() !== 0);
+  render(1100);
+  check("..that is over by itself (no note held on)", ex.web_kid_cheer() === 0);
+  render(1500);
+  algo(1);
+  render(400);
+  {                                                // (the songs as the build has them: TWINKLE first in English)
+    const sk = (song, i) => ex.web_kid_song_key(song, i), k0 = sk(0, 0);
+    let i = 0;
+    while (sk(0, i) === k0) i++;
+    const k1 = sk(0, i), wrong = [0, 1, 2, 3].find((k) => k !== k1);
+    check(`FOLLOW: the first note's key lights (key ${k0})`, ((ex.web_lit_keys() >> k0) & 1) === 1);
+    /* u/jrej: SEQ lit, as it picks the song; the song's picture at the band's left, for a child who can't read yet */
+    const seqLit = () => ((ex.web_lit_buttons() >> B.SEQ) & 1) === 1;
+    const slot = () => { let h = 0; for (let y = 189; y < 237; y += 2) for (let x = 6; x < 54; x += 2) h = (h * 31 + px(x, y)) >>> 0; return h; };
+    const inks = () => { const c = new Set(); for (let y = 189; y < 237; y += 2) for (let x = 6; x < 54; x += 2) c.add(px(x, y)); return c.size; };
+    check("FOLLOW: SEQ is lit", seqLit());
+    for (let j = 0; j < i; j++) { ex.web_keys(1 << k0); render(150); ex.web_keys(0); render(250); }
+    check(`pressed ${i} time(s): the next note (key ${k1}) lights`, ((ex.web_lit_keys() >> k1) & 1) === 1 && !((ex.web_lit_keys() >> k0) & 1));
+    ex.web_keys(1 << wrong); render(150); ex.web_keys(0); render(300);
+    check("a wrong key: nothing moves on", ((ex.web_lit_keys() >> k1) & 1) === 1);
+    tapb(B.SEQ); render(200);
+    check(`SEQ: the next song (it starts on key ${sk(1, 0)})`, ((ex.web_lit_keys() >> sk(1, 0)) & 1) === 1);
+    shot("follow_song");
+    const pic1 = slot();                                                       // (the song's name: the same band each time,
+    render(2000);                                                              //  so the slot differs only by the picture)
+    check(`..and its picture at the band's left, there while it plays too (${inks()} colours)`, inks() >= 4);
+    tapb(B.SEQ); render(200);
+    check("..the next song: another picture", slot() !== pic1 && inks() >= 4);
+  }
+  // CHORDS (u/Yablan): a lesson's chord lights up with its name; exactly its keys say YES and light the next; four make
+  // the loop; SEQ the next lesson; PLAY the LOFI beat, a bar a chord
+  algo(1);
+  render(1800);
+  const mask = (...ks) => ks.reduce((a, k) => a | (1 << k), 0), litIs = (m) => (ex.web_lit_keys() & 0x7FFFFFF) === m;
+  const C = mask(7, 11, 14), F = mask(7, 12, 16), G = mask(6, 9, 14);
+  shot("chords");
+  check("CHORDS: FIRST CHORDS, C lights (C E G), its letters in the band", litIs(C) && bandHas(C_RED) && bandHas(G_TEAL));
+  ex.web_keys(F); render(300); ex.web_keys(0); render(300);
+  check("..another chord: nothing moves on", litIs(C));
+  ex.web_keys(C); render(200);
+  check("..exactly its keys: YES!", bandHas(col(56, 170, 80)));
+  ex.web_keys(0); render(800);
+  check("..and the next chord (F: C F A) lights", litIs(F));
+  for (const m of [F, G, C]) { ex.web_keys(m); render(200); ex.web_keys(0); render(800); }
+  check("..all four: round again to C", litIs(C));
+  for (let i = 0; i < 3; i++) tapb(B.SEQ);
+  render(1800);
+  const FMAJ7 = mask(0, 4, 7, 11), EMIN7 = mask(2, 6, 9, 11);
+  shot("chords_lofi");
+  check("SEQ three times: LOFI, Fmaj7 lights (F A C E)", litIs(FMAJ7));
+  tapb(B.PLAY); render(1200);
+  check("PLAY: the LOFI beat, Fmaj7 for the first bar", ex.web_playing() === 1 && (litIs(FMAJ7) || litIs(0)));
+  render(3000);
+  check("..the next bar: Em7 (G B D E)", litIs(EMIN7) || litIs(0));
+  let seen = false;
+  for (let i = 0; i < 40 && !seen; i++) { render(100); seen = litIs(EMIN7); }
+  ex.web_keys(EMIN7); render(200);
+  check("..played in its bar: YES!", seen && bandHas(col(56, 170, 80)));
+  ex.web_keys(0);
+  tapb(B.PLAY); render(400);
+  // COPY ME: the friend plays a pattern of two notes, the child plays it back, each round the friend adds a note, a wrong
+  // key plays it again, PLAY too, and eight notes is a star and a fresh start
+  algo(1);
+  const cs = () => ex.web_kid_copy_state(), cl = () => ex.web_kid_copy_len();
+  const until = (st, max = 12000) => { let t = 0; while (cs() !== st && t < max) { render(20); t += 20; } return cs() === st; };
+  const press = (k) => { ex.web_keys(1 << k); render(120); ex.web_keys(0); render(120); };
+  const pat = () => [...Array(cl()).keys()].map((i) => ex.web_kid_copy_key(i));
+  shot("copy");
+  check("COPY ME: a new game, the friend plays two notes (LISTEN in the band, then YOUR TURN)", until(1, 4000) && until(2) && cl() === 2);
+  const p1 = pat();
+  const nope = [7, 9, 11, 14, 16].find((k) => k !== p1[0]);
+  press(nope); render(300);
+  check("..a wrong key: TRY AGAIN, then the same pattern again", bandHas(col(236, 120, 40)) && until(1, 3000) && until(2) && pat().join() === p1.join());
+  for (const k of p1) press(k);
+  check("..the whole pattern: YES! and confetti", bandHas(col(56, 170, 80)));
+  check("..and the next round is one note longer, the same start", until(1, 4000) && until(2) && cl() === 3 && pat().slice(0, 2).join() === p1.join());
+  tapb(B.PLAY); render(300);
+  check("PLAY: the friend plays the pattern again", cs() <= 1 && until(2) && cl() === 3);
+  for (let r = 0; r < 8 && cl() < 8; r++) { until(2); for (const k of pat()) press(k); until(1, 4000); }
+  until(2);
+  check("..eight notes is as long as it gets", cl() === 8);
+  for (const k of pat()) press(k);
+  render(300);
+  check("..played back: STAR! and a fresh start from two notes", until(2, 9000) && cl() === 2);
+  algo(-1); algo(-1); algo(-1); algo(-1); algo(-1); algo(-1); algo(-1); render(1500);
+}
+
+// WRITE (SAVE): the child's own song. A key writes a note (a friend in a ball of the note's color) and the column moves on, the
+// same key again takes it out, HOME wipes the column, PLAY plays it back, it is kept over a power-off, REC held 2 s
+// starts a new one, and SAVE goes back to playing
+{
+  const col = (r, g, b) => ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+  const C_RED = col(236, 40, 52), G_TEAL = col(30, 176, 150), A_PUR = col(146, 84, 226);
+  const ball = (c, step) => px(46 + c * 23 + 10, 128 - 6 * step + 9);         // a pixel inside the ball, under the friend
+  const tapb = (b, ms = 60) => { ex.web_buttons(1 << b); render(ms); ex.web_buttons(0); render(250); };
+  const key = (k, ms = 150) => { ex.web_keys(1 << k); render(ms); ex.web_keys(0); render(200); };
+  render(7000);
+  const name = band();
+  tapb(B.SAVE); render(300);
+  shot("write0");
+  check("SAVE: WRITE, a big staff and its word (SAVE lit)", band() !== name && ((ex.web_lit_buttons() >> B.SAVE) & 1) === 1);
+  for (let i = 0; i < 3; i++) { tapb(B.REC, 2300); }                           // (a new song, whatever was there)
+  key(7); key(7); key(14); key(16);                                           // C C G A
+  shot("write1");
+  check("keys write their notes, a column each (C red, C red, G teal, A purple)",
+        ball(0, 0) === C_RED && ball(1, 0) === C_RED && ball(2, 4) === G_TEAL && ball(3, 5) === A_PUR);
+  tapb(B.OCTDN);                                                              // back to column 3 (the A)
+  key(16);
+  check("the same key again takes its note out", ball(3, 5) !== A_PUR);
+  key(14);                                                                    // a G there instead, then column 4
+  tapb(B.OCTDN); tapb(B.HOME);                                                // HOME wipes column 3
+  check("HOME wipes the column", ball(3, 4) !== G_TEAL && ball(2, 4) === G_TEAL);
+  ex.web_keys((1 << 7) | (1 << 11)); render(150); ex.web_keys(0); render(250);   // C and E together: one column
+  check("two keys together: a chord in one column", ball(3, 0) === C_RED && ball(3, 2) !== ball(3, 1));
+  peak = 0;
+  tapb(B.PLAY); render(2200);
+  shot("write2");
+  check(`PLAY: the song plays (peak ${peak.toFixed(3)})`, ex.web_playing() === 1 && peak > 0.03);   // (silence is ~0; a
+                                                  // song 0.05 or so: the friend's own level and phase move it a little)
+  tapb(B.PLAY); render(500);
+  for (let i = 0; i < 18; i++) tapb(B.SEQ);                                   // (a late beat: it needs 5 bits to be kept)
+  const wb = ex.web_kid_wbeat();
+  render(5000);
+  const nor = new Uint8Array(mem.buffer, ex.web_nor(), ex.web_nor_size()).slice();
+  const e2 = (await WebAssembly.instantiate(fs.readFileSync(wasmPath), {})).instance.exports;
+  e2._initialize();
+  new Uint8Array(e2.memory.buffer, e2.web_nor(), e2.web_nor_size()).set(nor);
+  e2.web_boot(); e2.web_master(1023);
+  const r2 = (ms) => { for (let k = 0; k < Math.round(ms * 44.1); k += 128) e2.web_render(128); };
+  r2(1500); e2.web_keys(1 << 20); r2(100); e2.web_keys(0); r2(1500); e2.web_buttons(1 << B.SAVE); r2(60); e2.web_buttons(0); r2(600);
+  const p2 = (x, y) => { const v = new Uint16Array(e2.memory.buffer, e2.web_screen(), 240 * 240)[y * 240 + x]; return ((v & 255) << 8) | (v >> 8); };
+  check("kept over a power-off: the next start's WRITE has the song", p2(46 + 10, 128 + 9) === C_RED && p2(46 + 2 * 23 + 10, 128 - 24 + 9) === G_TEAL);
+  check(`..and its beat (${wb}, as written)`, wb >= 16 && e2.web_kid_wbeat() === wb);
+  tapb(B.REC, 2300);
+  check("REC held 2 s: a new, empty song", ball(0, 0) !== C_RED && ball(2, 4) !== G_TEAL);
+  // loop and layer: PLAY on an empty song is a loop of two bars; a key is written where the beat is, to be heard the next
+  // time round; PRESETS another friend for another layer; HOME wipes the column that is playing
+  tapb(B.PLAY); render(700);
+  check("WRITE, PLAY on an empty song: a loop of two bars (8 columns) to play into", ex.web_playing() === 1 && ex.web_kid_wlen() === 8);
+  key(7); render(200);
+  ex.web_enc(EN.PRESETS, 1); render(300);
+  key(14); render(300);
+  const notes = () => { const o = []; for (let c = 0; c < 32; c++) for (let j = 0; j < 2; j++) { const v = ex.web_kid_wnote(c, j); if (v) o.push(v); } return o; };
+  const wr = notes();
+  check(`..two keys played in are written (${wr.length} notes: C, then G with the next friend as another layer)`,
+        wr.length === 2 && (wr[0] & 31) === 8 && (wr[1] & 31) === 15 && (wr[0] >> 5) !== (wr[1] >> 5));
+  tapb(B.PLAY); render(300);
+  peak = 0; tapb(B.PLAY); render(5200);
+  check(`..and heard the next time round, with no key pressed (peak ${peak.toFixed(3)})`, peak > 0.02);
+  const col1 = [...Array(32).keys()].find((c) => ex.web_kid_wnote(c, 0) || ex.web_kid_wnote(c, 1));
+  for (let i = 0; i < 600 && ex.web_kid_wat() !== col1; i++) render(10);
+  tapb(B.HOME); render(100);
+  check("..HOME while it plays wipes the column that is playing (one of the two notes is left)", notes().length === 1);
+  tapb(B.PLAY); render(300);
+  tapb(B.REC, 2300);
+  check("..a new song: empty again, a loop of one bar", notes().length === 0 && ex.web_kid_wlen() === 4);
+  while (ex.web_kid_friend() !== 12) { ex.web_enc(EN.PRESETS, 1); render(150); }   // SCISSORS, a drum friend
+  render(300);
+  key(7);                                                                     // its kick (GM 36), as the keys play it
+  let drum = -1;
+  for (let s = 0; s < 3; s++) if (ex.web_step(s, 0) >> 8) drum = ex.web_step(s, 0);
+  check(`a drum friend's note is the drum its key plays (a kick hit, not a pitch: ${drum.toString(16)})`, drum > 0 && ((drum >> 8) & 1) === 1);
+  tapb(B.REC, 2300);
+  tapb(B.SAVE); render(1800);
+  check("SAVE again: back to playing (the friend's name, SAVE dark)", !((ex.web_lit_buttons() >> B.SAVE) & 1) && band() !== "");
+  key(12); render(300);
+  check("and the keys play as before", peak > 0.05);
+}
+
+// SEQ: ten beats, each named in the band; the friend's bass line plays with them
+{
+  const seen = new Set();
+  for (let i = 0; i < 11; i++) { ex.web_buttons(1 << B.SEQ); render(60); ex.web_buttons(0); render(200); seen.add(band()); }
+  check(`SEQ steps through eleven beats (${seen.size} different names)`, seen.size === 11);
+}
+
+// BREAK: Felucca's own drum loop (SLICE's BREAK, its 16 slices in order, one a step) as a beat; and back to a kit after it
+{
+  const tapb = (b) => { ex.web_buttons(1 << b); render(60); ex.web_buttons(0); render(250); };
+  for (let i = 0; i < 25 && ex.web_kid_beat() !== 20; i++) tapb(B.SEQ);
+  check("SEQ: the BREAK beat (the last of 21)", ex.web_kid_beat() === 20);
+  peak = 0; tapb(B.PLAY); render(4000);
+  check(`..PLAY: the break plays (peak ${peak.toFixed(3)})`, ex.web_playing() === 1 && peak > 0.05);
+  tapb(B.PLAY); render(1500);
+  tapb(B.SEQ); render(300);
+  check("..the next beat is the first again, and its kit plays", ex.web_kid_beat() === 0);
+  peak = 0; tapb(B.PLAY); render(3000);
+  check(`..(peak ${peak.toFixed(3)})`, ex.web_playing() === 1 && peak > 0.05);
+  tapb(B.PLAY); render(1500);
+}
+
+// REC: the next sky
+{
+  render(1700);
+  const sky0 = new Uint16Array(mem.buffer, ex.web_screen(), 240 * 240).slice(0, 240 * 180).join(",");
+  ex.web_buttons(1 << B.REC); render(60); ex.web_buttons(0); render(2000);
+  const sky1 = new Uint16Array(mem.buffer, ex.web_screen(), 240 * 240).slice(0, 240 * 180).join(",");
+  check("REC: another sky", sky0 !== sky1);
+}
+
+// the grown-ups' NAME: HOME held 1 s, then ALGORITHM opens it; PRESETS picks a letter, ALGORITHM the next, SAVE keeps it
+// (and the hello says it, after a power-off too), HOME leaves it as it was
+{
+  const CREAM = (31 << 11) | (61 << 5) | 28, f0 = ex.web_kid_friend();
+  const hello = async (nor) => {                                              // a fresh FM-1's hello, 1.5 s in
+    const e = (await WebAssembly.instantiate(fs.readFileSync(wasmPath), {})).instance.exports;
+    e._initialize();
+    if (nor) new Uint8Array(e.memory.buffer, e.web_nor(), e.web_nor_size()).set(nor); else e.web_nor_erase();
+    e.web_boot(); e.web_master(1023);
+    for (let k = 0; k < 517; k++) e.web_render(128);
+    return new Uint16Array(e.memory.buffer, e.web_screen(), 240 * 240).slice(0, 240 * 150).join(",");
+  };
+  ex.web_buttons(1 << B.HOME); render(1300);
+  ex.web_enc(EN.ALGO, 1); render(200);
+  ex.web_buttons(0); render(300);
+  shot("name");
+  check("NAME: HOME held 1 s, then ALGORITHM, opens it", px(5, 5) === CREAM);
+  ex.web_enc(EN.PRESETS, 1); render(60); ex.web_enc(EN.ALGO, 1); render(60); ex.web_enc(EN.PRESETS, 2); render(60);   // "AB"
+  ex.web_keys(1 << 12); render(200); ex.web_keys(0); render(100);
+  check("..PRESETS writes letters there, not friends", ex.web_kid_friend() === f0 && px(5, 5) === CREAM);
+  ex.web_buttons(1 << B.SAVE); render(60); ex.web_buttons(0); render(1500);
+  shot("name_hello");
+  check("..SAVE keeps it: the hello again", px(5, 5) !== CREAM);
+  render(3000);
+  const nor = new Uint8Array(mem.buffer, ex.web_nor(), ex.web_nor_size()).slice();
+  check("..and after a power-off the hello greets the name", (await hello(nor)) !== (await hello(null)));
+  ex.web_buttons(1 << B.HOME); render(1300); ex.web_enc(EN.ALGO, 1); render(200); ex.web_buttons(0); render(300);
+  ex.web_enc(EN.PRESETS, 1); render(60);
+  ex.web_buttons(1 << B.HOME); render(60); ex.web_buttons(0); render(1500);
+  const nor2 = new Uint8Array(mem.buffer, ex.web_nor(), ex.web_nor_size()).slice();
+  check("..HOME leaves it as it was", px(5, 5) !== CREAM && (await hello(nor2)) === (await hello(nor)));
+}
+
+// the HAT: HOME held 1 s, then KNOB 4 puts a hat on the friend (round: none, ten hats), kept over a power-off; KNOB 4 alone is
+// still WIGGLE. The first hat is the PARTY cone, red and yellow with a pink band: found by the cone's pink (255, 62, 150)
+{
+  const HP = (236 >> 3) << 11 | (64 >> 2) << 5 | (150 >> 3);                 // hpink (236, 64, 150) as RGB565
+  const pink = (e) => { const fb = new Uint16Array(e.memory.buffer, e.web_screen(), 240 * 240); let n = 0; for (let y = 0; y < 190; y++) for (let x = 0; x < 240; x++) { const v = fb[y * 240 + x]; if ((((v & 255) << 8) | (v >> 8)) === HP) n++; } return n; };
+  for (let i = 0; i < 200 && ex.web_kid_friend() !== 40; i++) { ex.web_enc(EN.PRESETS, 1); render(60); }   // (T-REX: no pink of its own)
+  const f0 = ex.web_kid_friend();
+  render(2500);
+  const bare = pink(ex);
+  ex.web_buttons(1 << B.HOME); render(1300);
+  ex.web_enc(EN.K4, 1); render(200);
+  const name = band();
+  ex.web_buttons(0); render(2600);
+  check(`HAT: HOME held 1 s, KNOB 4: the first hat is on the friend (${bare} -> ${pink(ex)} hat pixels, no surprise friend)`, pink(ex) > bare + 4 && ex.web_kid_friend() === f0);
+  render(3000);
+  const nor = new Uint8Array(mem.buffer, ex.web_nor(), ex.web_nor_size()).slice();
+  const powered = async (norIn) => {                                         // a fresh FM-1 (with the settings kept, or none) at its first friend
+    const e4 = (await WebAssembly.instantiate(fs.readFileSync(wasmPath), {})).instance.exports;
+    e4._initialize();
+    if (norIn) new Uint8Array(e4.memory.buffer, e4.web_nor(), e4.web_nor_size()).set(norIn); else e4.web_nor_erase();
+    e4.web_boot(); e4.web_master(1023);
+    for (let k = 0; k < 400; k++) e4.web_render(128);
+    e4.web_keys(1); for (let k = 0; k < 40; k++) e4.web_render(128); e4.web_keys(0);
+    for (let k = 0; k < 600; k++) e4.web_render(128);
+    return pink(e4);
+  };
+  check("..kept over a power-off", (await powered(nor)) > (await powered(null)) + 4);
+  ex.web_buttons(1 << B.HOME); render(1300);
+  for (let i = 0; i < 10; i++) { ex.web_enc(EN.K4, 1); render(80); }
+  ex.web_buttons(0); render(2600);
+  check("..ten more steps: every hat, then none again", pink(ex) <= bare + 1);
+  const kn = () => ex.web_kid_knobs(), w0 = (kn() >> 8) & 255, e0 = kn() & 255;
+  ex.web_enc(EN.K4, 2); render(300);
+  const w1 = (kn() >> 8) & 255;
+  check(`KNOB 4 alone is still WIGGLE (no hat; wiggle ${w0} -> ${w1})`, band() !== name && pink(ex) <= bare + 1 && w1 === Math.min(8, w0 + 2));
+  ex.web_enc(EN.K4, -2); render(300);
+  ex.web_enc(EN.K3, 2); render(300);
+  const e1 = kn() & 255;
+  check(`KNOB 3 alone is ECHO (echo ${e0} -> ${e1})`, e1 === Math.min(8, e0 + 2));
+  ex.web_enc(EN.K3, -2); render(300);
+  check("..and back", (kn() & 255) === e0 && ((kn() >> 8) & 255) === w0);
+}
+
+// STARS: each game won is a star (kept a few seconds after the last, so over a power-off); 10 give the STAR hat, 50 the
+// secret friend; HOME held 1 s, then KNOB 3, shows how far the next one is
+{
+  const win = () => { ex.web_kid_win(); render(300); };
+  const hatStep = (n) => { ex.web_buttons(1 << B.HOME); render(1300); for (let i = 0; i < n; i++) { ex.web_enc(EN.K4, 1); render(80); } ex.web_buttons(0); render(300); };
+  const tour = () => { const seen = new Set(); for (let i = 0; i < NF + 4; i++) { ex.web_enc(EN.PRESETS, 1); render(120); seen.add(ex.web_kid_friend()); } return seen; };
+  const f0 = ex.web_kid_friend();
+  ex.web_kid_stars_set(8); hatStep(11);                                       // (a full round of the hats: the STAR one is not there)
+  check("STARS: before 10, the STAR hat is not on KNOB 4's round (it ends on none)", ex.web_kid_hat() === 0);
+  render(2200);
+  let seen = tour();
+  check(`..and before 50 the secret friend is not on PRESETS (${seen.size} friends)`, seen.size === NFP && !seen.has(NF - 1));
+  const rec = () => { ex.web_buttons(1 << B.REC); render(60); ex.web_buttons(0); render(250); };
+  const skies = () => { const seen = new Set(); for (let i = 0; i < 17; i++) { rec(); seen.add(ex.web_kid_scene()); } return seen; };
+  let sk = skies();
+  check(`..nor is the secret sky (the aurora) on REC's round before 25 stars (${sk.size} skies)`, sk.size === 14 && !sk.has(14));
+  const was = band();
+  win(); win();
+  check("two wins: 10 stars", ex.web_kid_stars() === 10);
+  check("..the STAR hat is on (a new hat!)", ex.web_kid_hat() === 11 && band() !== was);
+  shot("star_hat");
+  render(2500);
+  ex.web_buttons(1 << B.HOME); render(1300); ex.web_enc(EN.K3, 1); render(200);
+  const meter = band();
+  ex.web_buttons(0); render(2200);
+  check("HOME held 1 s, KNOB 3: STARS shows in the band (then the friend's name again)", meter !== band());
+  shot("stars");
+  ex.web_kid_stars_set(24); render(2200);
+  win();
+  check("one more win: 25 stars, and the aurora is the sky (a new sky!)", ex.web_kid_stars() === 25 && ex.web_kid_scene() === 14);
+  shot("star_sky");
+  render(2500);
+  sk = skies();
+  check(`..now it is on REC's round (${sk.size} skies)`, sk.size === 15);
+  ex.web_kid_stars_set(49); render(2200);
+  win();
+  check("one more win: 50 stars, and the secret friend is there", ex.web_kid_stars() === 50 && ex.web_kid_friend() === NF - 1);
+  shot("star_friend");
+  render(2500);
+  seen = tour();
+  check(`..now it is on PRESETS (${seen.size} friends)`, seen.size === NF);
+  const nor = new Uint8Array(mem.buffer, ex.web_nor(), ex.web_nor_size()).slice();
+  render(1500);                                                               // (a tenth star and the secrets are written at once)
+  const nor2 = new Uint8Array(mem.buffer, ex.web_nor(), ex.web_nor_size()).slice();
+  const e5 = (await WebAssembly.instantiate(fs.readFileSync(wasmPath), {})).instance.exports;
+  e5._initialize();
+  new Uint8Array(e5.memory.buffer, e5.web_nor(), e5.web_nor_size()).set(nor2);
+  e5.web_boot();
+  for (let k = 0; k < 400; k++) e5.web_render(128);
+  check(`..kept over a power-off (${e5.web_kid_stars()} stars)`, e5.web_kid_stars() === 50);
+  win(); win(); win();                                                        // 53: not a tenth, so written after half a minute of quiet
+  render(31500);
+  const nor3 = new Uint8Array(mem.buffer, ex.web_nor(), ex.web_nor_size()).slice();
+  const e6 = (await WebAssembly.instantiate(fs.readFileSync(wasmPath), {})).instance.exports;
+  e6._initialize();
+  new Uint8Array(e6.memory.buffer, e6.web_nor(), e6.web_nor_size()).set(nor3);
+  e6.web_boot();
+  for (let k = 0; k < 400; k++) e6.web_render(128);
+  check(`..and the ones after it, written after half a minute of quiet (${e6.web_kid_stars()} stars)`, e6.web_kid_stars() === 53);
+  ex.web_kid_stars_set(0); hatStep(11);                                       // (back as the other tests left it: no hat, no stars)
+  while (ex.web_kid_friend() !== f0) { ex.web_enc(EN.PRESETS, 1); render(120); }
+  render(1500);
+}
+
+for (const r of [EN.K1, EN.K2, EN.K3, EN.K4, EN.ALGO, EN.SELECT]) { ex.web_enc(r, 3); render(200); }
+for (const b of [B.FX, B.SCL, B.ENV, B.LFO, B.EDIT, B.GLO, B.ARP, B.SEQ, B.REC, B.HOME]) { ex.web_buttons(1 << b); render(60); ex.web_buttons(0); render(300); }
+shot("knobs");
+check("every knob and button turned and pressed: still running", ex.web_now_ms() > 0);
+
+ex.web_buttons((1 << B.HOME) | (1 << B.SAVE));
+render(3300);
+ex.web_buttons(0);
+render(400);
+shot("exit");
+check("HOME + SAVE held 3 s: the full Felucca (HOME's LED lit)", (ex.web_lit_buttons() >> B.HOME) & 1);
+
+console.log(fails ? `kid: ${fails} FAILED` : "kid: all ok");
+process.exit(fails ? 1 : 0);
