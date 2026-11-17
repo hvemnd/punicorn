@@ -156,11 +156,7 @@ static void lcd_init(void) {}
 #include "../../firmware/src/ui_menu.c"
 #include "../../firmware/src/ui_input.c"
 #include "../../firmware/src/ui_layer.c"
-#if KID_LANG                            /* (EMU_CFLAGS=-DKID_LANG=1: build/gen/kid_lang.c, tools/gen_kid_lang.py) */
-#include "kid_lang.c"
-#else
-#include "../../firmware/src/kid.c"
-#endif
+#include "../../firmware/src/puni.c"         /* Punicorn (in the place of Rainbow mode's kid.c) */
 
 /* ------------------------------------------------------------ the flash --- */
 static uint32_t web_flash_writes;
@@ -243,7 +239,7 @@ static void cdc_task(void) {}
 #undef usb_detach
 
 /* --------------------------------------------------------- the device --- */
-static uint32_t web_booted, web_boot_ms, web_last_frame;
+static uint32_t web_booted, web_boot_ms, web_last_frame, web_busy_until;
 
 /* main.c fm1_main's boot, up to the main loop (no USB, no UART, no panel setup) */
 static void web_power_on(void)
@@ -321,9 +317,11 @@ static void web_ms(void)
         lcd_fill(0, 0, 240, 240, T_BG);
         web_last_frame = fm1_ms - 15u;
     }
-    if (fm1_ms - web_last_frame >= 15u) {                /* main.c: a frame, then ui_input until 15 ms are over */
+    if (fm1_ms - web_last_frame >= 15u && (int32_t)(fm1_ms - web_busy_until) >= 0) {   /* main.c: a frame, then ui_input until 15 ms are over */
         web_last_frame = fm1_ms;
+        pg.sent = 0;
         web_frame();
+        web_busy_until = fm1_ms + pg.sent / 750u;         /* (the panel's SPI: 750 pixels a ms) */
     } else if (!KID_ON()) {
         ui_input();                                       /* main.c's wait loop */
     }
@@ -486,30 +484,6 @@ EXPORT uint32_t web_screen_draws(void) { return web_draws; }
 EXPORT uint32_t web_now_ms(void) { return fm1_ms; }
 EXPORT uint32_t web_playing(void) { return song.playing; }
 EXPORT int32_t web_lim_t(void) { return lim_t; }
-EXPORT uint32_t web_kid_guess(void) { return kid.g_target; }
-EXPORT uint32_t web_kid_copy_len(void) { return kid.m_len; }                      /* (kid_test.mjs: COPY ME's pattern) */
-EXPORT uint32_t web_kid_copy_key(uint32_t i) { return kid.m_seq[i & 7u]; }
-EXPORT uint32_t web_kid_copy_state(void) { return kid.m_state; }                  /* 0 pause, 1 the friend plays, 2 your turn */
-EXPORT uint32_t web_kid_stars(void) { return kid_stars(); }                         /* (kid_test.mjs: the STARS) */
-EXPORT void web_kid_stars_set(uint32_t n) { kid_stars_set(n); }
-EXPORT void web_kid_set_param(uint32_t i, int32_t v) { if (i < P_COUNT) trk[0].p[i] = (int16_t)v; }   /* (tools: trying a sound's knobs) */
-EXPORT uint32_t web_p_idx(uint32_t w) { static const uint8_t T[] = {P_E0, P_ATK, P_DEC, P_SUS, P_REL, P_DIST, P_CHOR, P_DLY, P_REV, P_LD_PIT, P_GLIDE}; return w < sizeof T ? T[w] : 0u; }   /* (tools) */
-EXPORT void web_kid_set_level(uint32_t v) { trk[0].p[P_LEVEL] = (int16_t)v; }          /* (tools: leveling a friend) */
-EXPORT uint32_t web_kid_scene(void) { return kid.scene; }
-EXPORT uint32_t web_kid_beat(void) { return kid.beat; }
-EXPORT uint32_t web_kid_wat(void) { return (uint32_t)kw_at(); }
-EXPORT uint32_t web_kid_wlen(void) { return kw_len(); }                               /* (kid_test.mjs: WRITE's loop, in columns) */
-EXPORT uint32_t web_kid_wnote(uint32_t c, uint32_t j) { return kw.note[c % KW_COLS][j & 1u]; }
-EXPORT uint32_t web_kid_wbeat(void) { return kw.beat; }                             /* (kid_test.mjs: WRITE's beat) */
-EXPORT void web_kid_win(void) { kid_win(0); }                                         /* (kid_test.mjs: a game won) */
-EXPORT uint32_t web_kid_hat(void) { return KID_HAT; }
-EXPORT uint32_t web_kid_txt(uint32_t i) { return kf.txt && i < str_len(kf.txt) ? (uint32_t)(uint8_t)kf.txt[i] : 0u; }   /* (kid_test.mjs: the band's word) */
-EXPORT uint32_t web_kid_song_key(uint32_t song, uint32_t i) { return kid_song_key(song, i); }   /* (kid_test.mjs: FOLLOW's songs, in any language) */
-EXPORT uint32_t web_kid_card(void) { return kf.card ? 1u + kid.mode : 0u; }   /* (kid_test.mjs: ALGORITHM's card, mode + 1) */
-EXPORT uint32_t web_kid_knobs(void) { return kid.echo | (uint32_t)kid.wiggle << 8 | (uint32_t)kid.night << 16; }   /* (kid_test.mjs: KNOB 3, 4, 2) */
-EXPORT uint32_t web_kid_cheer(void) { return kid.cheer_n | ((uint32_t)kid.cheer_on << 8); }   /* (kid_test.mjs: the cheer's notes left, and sounding) */
-EXPORT uint32_t web_kid_friend(void) { return kid.fr; }
-EXPORT void web_kid_friend_set(uint32_t f) { if (f < KID_N) kid_friend(f); }   /* (tools/video: straight to a friend) */
 EXPORT uint32_t web_kb_chord(uint32_t k, uint32_t i)    /* (kid_test.mjs: the notes key k started, 0 none) */
 { return k < 27u && i < kb_chn[k] ? kb_chord[k][i] : 0u; }
 EXPORT uint32_t web_voices(uint32_t t)                  /* (kid_test.mjs: a track's sounding voices) */
@@ -526,13 +500,5 @@ EXPORT uint32_t web_step(uint32_t t, uint32_t c)        /* (kid_test.mjs: a step
 }   /* (kid_test.mjs: GUESS's note, as a key) */
 EXPORT void web_boost_q12(uint32_t v) { web_boost = v; }
 EXPORT uint32_t web_master_q12(void) { return song.master_q12; }
-EXPORT void web_kid(uint32_t on)               /* Rainbow mode off (the tests: the full Felucca from boot) */
-{
-    if (!on && KID_ON()) {
-        if (kid.ready)
-            kid_leave();
-        else
-            kid.on = 0;
-    }
-}
+EXPORT uint32_t web_sent(void) { return pg.sent; }           /* pixels the last frame sent to the panel */
 EXPORT uint32_t web_sample_rate(void) { return FS; }

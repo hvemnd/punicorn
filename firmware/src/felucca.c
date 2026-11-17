@@ -44,7 +44,7 @@
 #endif
 #endif
 #ifndef FELUCCA_VERSION
-#define FELUCCA_VERSION "v1.1.5" /* shown in the menu, the console and the editor; build.py --release X.Y */
+#define FELUCCA_VERSION "v1.0-punicorn" /* shown in the menu, the console and the editor; build.py --release X.Y */
 #endif
 #if FELUCCA_OTA && !FELUCCA_FLASH
 #error "FELUCCA_OTA needs FELUCCA_FLASH"
@@ -103,11 +103,7 @@
 #include "ui_menu.c"
 #include "ui_input.c"
 #include "ui_layer.c"              /* the quick layers (FX GLO SCL EDIT REC held; SEQ TOOLS: ui_tools.c) */
-#if KID_LANG                            /* (build.py --lang: kid.c in another language, tools/gen_kid_lang.py) */
-#include "kid_lang.c"
-#else
-#include "kid.c"                   /* Rainbow mode (FELUCCA_KID): the toy for a small child, on from power-up */
-#endif
+#include "puni.c"                  /* PUNICORN (FELUCCA_KID): the toy for a small child, on from power-up */
 
 /* --------------------------------------------- storage, update, editor --- */
 #if FELUCCA_FLASH

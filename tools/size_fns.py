@@ -23,10 +23,10 @@ SIZE_FILES = ["ui.c", "favorites.c", "menu_items.c", "icons.c", "ui_graph.c", "u
               "usb.c", "midi_uart.c", "midi_control.c", "midi_clock.c", "seq.c", "song_chain.c", "chord.c", "motion.c",
               "panel.c", "lcd.c", "gfx.c", "ota.c", "ota_hw.c", "up_fm6.c", "slice_store.c", "params.c", "editor_fm6.c",
               "ui_layer.c", "ui_name.c", "ui_slice.c", "ui_events.c", "main.c", "libc.c", "storage_hw.c", "engines.c", "fm4_convert.c",
-              "kid.c"]
-# Rainbow mode's screen is drawn a pixel at a time (kid.c kid_paint): what it reaches keeps -Os, like the ISR's code,
-# so the frame rate stays where it was (kid.c built for size otherwise: about 4 KB of flash)
-FAST_ROOTS = ("kid_paint",)
+              "puni.c", "puni_gfx.c", "puni_uni.c", "puni_fx.c", "puni_scenes.c"]
+# Punicorn's frame (puni.c pu_frame: the scenes, the unicorn, the drawing) keeps -Os, like the ISR's code: it runs every
+# frame and draws every changed pixel
+FAST_ROOTS = ("pu_frame",)
 ISR_ROOTS = ("fm1_alnk0_irq", "fm1_timer5_irq")      # hal/fm1_isr.S: the audio ISR, the key / LED scan (+ USB poll)
 DEF = re.compile(r"^(?:static|void|int|uint\w*|int\w*|const)\b[^;=(]*?\b([A-Za-z_]\w*)\s*\(", re.M)
 IR_DEF = re.compile(r"^(define [^\n]*?@\"?([\w.]+)\"?\([^\n]*\)(?: unnamed_addr| local_unnamed_addr)?)( #\d+[^\n]*\{)$",

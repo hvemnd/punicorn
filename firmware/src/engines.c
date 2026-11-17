@@ -16,6 +16,7 @@
 #include "eng_noise.c"
 #include "eng_fm6.c"            /* FM6: 6-operator FM, msfa ported (fm6_core.c, Apache-2.0) */
 #include "fm4_convert.c"        /* DIGITAL's tables, and its sounds -> FM6 */
+#include "eng_puni.c"           /* PUNI: Punicorn's own sounds, in DIGITAL's empty slot */
 #if FELUCCA_FM4
 #include "eng_digital.c"        /* DIGITAL: four-operator FM (retired; FELUCCA_FM4=1 builds it) */
 #endif
@@ -29,7 +30,8 @@ static const engine_t *const ENGINES[NENGINES] = {
 #if FELUCCA_FM4
     &ENG_DIGITAL,                /* 1 (ENGI_DIGITAL) */
 #else
-    &ENG_FM4_GONE,               /* 1: reserved (DIGITAL, retired: its sounds convert to FM6, fm4_convert.c) */
+    &ENG_PUNI,                   /* 1: Punicorn's (eng_puni.c). The slot is DIGITAL's (retired, its sounds convert to
+                                  * FM6: fm4_convert.c): the full Felucca never offers it (eng_ok) */
 #endif
     &ENG_PHASE,                  /* 2 */
     &ENG_LOFI,                   /* 3 */
