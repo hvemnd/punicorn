@@ -92,6 +92,8 @@ static void scene_sound(void)
         t->p[P_VOICE] = V_POLY;
         if (t->p[P_REV] < 40)
             t->p[P_REV] = 40;
+        if (t->p[P_LEVEL] < 116)
+            t->p[P_LEVEL] = 116;
         break;
     case SC_FART:
         pu_puni(t, 0);
@@ -186,6 +188,7 @@ static void scene_apply(void)
         t->p[P_E5] = KV(KN_ALG);
         t->p[P_REV] = KV(KN_SEL);
         t->p[P_VOICE] = V_POLY;
+        t->p[P_LEVEL] = 124;                      /* (a pluck: as loud as the others to the ear) */
         break;
     case SC_BURP:
         t->p[P_E0] = KV(KN_1);
@@ -218,6 +221,7 @@ static void scene_apply(void)
         t->p[P_REV] = KV(KN_4);
         t->p[P_CHOR] = 60;
         t->p[P_CHRD] = CHORD_OF[KV(KN_ALG) & 3u];
+        t->p[P_LEVEL] = (int16_t)(KV(KN_ALG) ? 86 : 94);   /* (a held pad: softer than the hits) */
         perf_k[0] = (int8_t)-((127 - KV(KN_PRE)) / 3);   /* BRIGHT: Felucca's FX filter, closing */
         break;
     default:

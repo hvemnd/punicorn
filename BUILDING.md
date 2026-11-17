@@ -1,4 +1,4 @@
-# Building Felucca
+# Building Punicorn (Felucca)
 
 The build makes three files in `build/`:
 
@@ -18,7 +18,7 @@ The build makes three files in `build/`:
 - The JieLi Linux toolchain (clang 4.0.1 for pi32v2, from JieLi's package server):
 
   ```
-  tools/get_toolchain.sh            # installs to ~/.jieli/toolchain
+  sh tools/get_toolchain.sh         # installs to ~/.jieli/toolchain
   ```
 
 - The JieLi AC79 SDK (Apache-2.0). The package uses three of its files
@@ -37,7 +37,7 @@ On Linux x86-64 the toolchain runs natively and Docker is not needed.
 ## Build
 
 ```
-./build.sh
+sh build.sh
 ```
 
 `JIELI_TOOLCHAIN` and `AC79_SDK` override the default locations
@@ -87,7 +87,7 @@ at the note's pitch instead, and the screen says NO SAMPLE.
 ## Browser emulator
 
 ```
-./build.sh
+sh build.sh
 web/emu/build.sh
 python3 -m http.server -d build/emu 8790     # open http://localhost:8790/
 ```
