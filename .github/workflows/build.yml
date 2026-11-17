@@ -95,8 +95,8 @@ jobs:
         run: |
           od="$HOME/.jieli/toolchain/common/bin/objdump"
           if [ -f build/felucca.elf ]; then
-            { echo "---- sections"; "$od" -h build/felucca.elf | head -40
-              echo "---- biggest symbols"; "$od" -t build/felucca.elf | awk '{print $(NF-1), $NF, $4}' | sort -r | head -150; } >> build.log 2>&1 || true
+            "$od" -t build/felucca.elf > build/syms.txt 2>/dev/null || true
+            python3 tools/sym_sizes.py build/syms.txt >> build.log 2>&1 || true
           fi
 
       - uses: actions/upload-artifact@v4
